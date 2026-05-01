@@ -1,5 +1,6 @@
 module.exports = {
-  TOKEN: '8694149096:AAFy1bfwtakXunDJPz2xBBb03UQQduMNAhs',
+  TOKEN: process.env.BOT_TOKEN || '8694149096:AAFy1bfwtakXunDJPz2xBBb03UQQduMNAhs',
+  WEBHOOK_DOMAIN: process.env.WEBHOOK_DOMAIN || '',  // e.g. https://mafia-xxx.vercel.app
   SUPER_ADMINS: new Set([8708233476]),
   CHANNEL_LINK: 'https://t.me/+fSrSDvfBXa82ZjQ6',
   MIN_PLAYERS: 8,

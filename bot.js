@@ -4,8 +4,6 @@ const s = require('./strings');
 const MafiaGame = require('./game');
 const { ROLES } = require('./roles');
 
-const bot = new Telegraf(config.TOKEN);
-
 /** groupId -> MafiaGame */
 const games = new Map();
 
@@ -165,162 +163,130 @@ function findGameByPlayer(userId) {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ─────────────────────────────────────────────────────────────
-// Commands
+// Setup & Launch
 // ─────────────────────────────────────────────────────────────
 
-bot.start(async (ctx) => {
-  await ctx.reply(
-    s.START(config.CHANNEL_LINK),
-    { parse_mode: 'HTML', disable_web_page_preview: false }
-  );
-});
+function setupBot(instance) {
+  instance.start(async (ctx) => {
+    await ctx.reply(
+      s.START(config.CHANNEL_LINK),
+      { parse_mode: 'HTML', disable_web_page_preview: false }
+    );
+  });
 
-bot.command('newgame', async (ctx) => {
-  if (ctx.chat.type === 'private') {
-    return ctx.reply(s.GROUP_ONLY);
-  }
-  const groupId = ctx.chat.id;
-  if (games.has(groupId)) return ctx.reply(s.GAME_ALREADY_RUNNING);
+  instance.command('newgame', async (ctx) => {
+    if (ctx.chat.type === 'private') return ctx.reply(s.GROUP_ONLY);
+    const groupId = ctx.chat.id;
+    if (games.has(groupId)) return ctx.reply(s.GAME_ALREADY_RUNNING);
+    const user = ctx.from;
+    games.set(groupId, new MafiaGame(groupId, user.id, fullName(user)));
+    await ctx.reply(s.GAME_STARTED_LOBBY(fullName(user), config.MIN_PLAYERS), { parse_mode: 'MarkdownV2' });
+  });
 
-  const user = ctx.from;
-  games.set(groupId, new MafiaGame(groupId, user.id, fullName(user)));
+  instance.command('join', async (ctx) => {
+    const groupId = ctx.chat.id;
+    const game = games.get(groupId);
+    if (!game || game.state !== 'lobby') return ctx.reply(s.GAME_NOT_RUNNING);
+    const user = ctx.from;
+    const added = game.addPlayer(user.id, fullName(user));
+    if (!added) return ctx.reply(s.ALREADY_JOINED);
+    await ctx.reply(s.JOINED(fullName(user), game.playerCount()), { parse_mode: 'MarkdownV2' });
+  });
 
-  await ctx.reply(
-    s.GAME_STARTED_LOBBY(fullName(user), config.MIN_PLAYERS),
-    { parse_mode: 'MarkdownV2' }
-  );
-});
+  instance.command('startgame', async (ctx) => {
+    const groupId = ctx.chat.id;
+    const game = games.get(groupId);
+    if (!game || game.state !== 'lobby') return ctx.reply(s.GAME_NOT_RUNNING);
+    if (!await isAdmin(ctx, ctx.from.id)) return ctx.reply(s.ONLY_ADMIN_CAN_START);
+    if (game.playerCount() < config.MIN_PLAYERS) {
+      return ctx.reply(s.NOT_ENOUGH_PLAYERS(config.MIN_PLAYERS, game.playerCount()), { parse_mode: 'MarkdownV2' });
+    }
+    game.start();
+    const playersList = [...game.players.values()].map(p => `• ${p.name}`).join('\n');
+    await ctx.reply(s.ROLES_ASSIGNED(playersList), { parse_mode: 'MarkdownV2' });
+    await sendDMs(game);
+    await ctx.reply(s.NIGHT_START(game.round), { parse_mode: 'MarkdownV2' });
+    await sendNightActions(game);
+    await sleep(config.NIGHT_DURATION);
+    if (game.state === 'night') await resolveAndDay(game);
+  });
 
-bot.command('join', async (ctx) => {
-  const groupId = ctx.chat.id;
-  const game = games.get(groupId);
-  if (!game || game.state !== 'lobby') return ctx.reply(s.GAME_NOT_RUNNING);
+  instance.command('cancel', async (ctx) => {
+    const groupId = ctx.chat.id;
+    const game = games.get(groupId);
+    if (!game) return ctx.reply(s.NO_GAME_TO_CANCEL);
+    if (!await isAdmin(ctx, ctx.from.id)) return ctx.reply(s.ONLY_ADMIN_CAN_CANCEL);
+    games.delete(groupId);
+    await ctx.reply(s.GAME_CANCELLED);
+  });
 
-  const user = ctx.from;
-  const added = game.addPlayer(user.id, fullName(user));
-  if (!added) return ctx.reply(s.ALREADY_JOINED);
+  instance.action(/^night_mafia:(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    const targetId = parseInt(ctx.match[1]);
+    const game = findGameByPlayer(userId);
+    if (!game || game.state !== 'night') return ctx.editMessageText(s.GAME_NOT_IN_NIGHT);
+    const player = game.players.get(userId);
+    if (!player?.alive) return ctx.editMessageText(s.PLAYER_DEAD);
+    if (player.hasActed) return ctx.answerCbQuery(s.ALREADY_ACTED, { show_alert: true });
+    game.recordMafiaVote(userId, targetId);
+    await ctx.editMessageText(s.NIGHT_ACTION_RECORDED);
+    if (game.allNightDone()) resolveAndDay(game);
+  });
 
-  await ctx.reply(s.JOINED(fullName(user), game.playerCount()), { parse_mode: 'MarkdownV2' });
-});
+  instance.action(/^night_doctor:(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    const targetId = parseInt(ctx.match[1]);
+    const game = findGameByPlayer(userId);
+    if (!game || game.state !== 'night') return ctx.editMessageText(s.GAME_NOT_IN_NIGHT);
+    const player = game.players.get(userId);
+    if (!player?.alive) return ctx.editMessageText(s.PLAYER_DEAD);
+    if (player.hasActed) return ctx.answerCbQuery(s.ALREADY_ACTED, { show_alert: true });
+    game.recordDoctorAction(userId, targetId);
+    await ctx.editMessageText(s.NIGHT_ACTION_RECORDED);
+    if (game.allNightDone()) resolveAndDay(game);
+  });
 
-bot.command('startgame', async (ctx) => {
-  const groupId = ctx.chat.id;
-  const game = games.get(groupId);
-  if (!game || game.state !== 'lobby') return ctx.reply(s.GAME_NOT_RUNNING);
+  instance.action(/^night_sheriff:(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    const targetId = parseInt(ctx.match[1]);
+    const game = findGameByPlayer(userId);
+    if (!game || game.state !== 'night') return ctx.editMessageText(s.GAME_NOT_IN_NIGHT);
+    const player = game.players.get(userId);
+    if (!player?.alive) return ctx.editMessageText(s.PLAYER_DEAD);
+    if (player.hasActed) return ctx.answerCbQuery(s.ALREADY_ACTED, { show_alert: true });
+    const ok = game.recordSheriffAction(userId, targetId);
+    if (!ok) return ctx.answerCbQuery(s.ALREADY_ACTED, { show_alert: true });
+    const targetName = game.players.get(targetId)?.name || '?';
+    const result = game.sheriffResult === 'mafia' ? s.SHERIFF_MAFIA(targetName) : s.SHERIFF_CLEAN(targetName);
+    await ctx.editMessageText(result, { parse_mode: 'MarkdownV2' });
+    if (game.allNightDone()) resolveAndDay(game);
+  });
 
-  if (!await isAdmin(ctx, ctx.from.id)) return ctx.reply(s.ONLY_ADMIN_CAN_START);
+  instance.action(/^vote:(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    const raw = ctx.match[1];
+    const targetId = raw === 'skip' ? 'skip' : parseInt(raw);
+    const game = findGameByPlayer(userId);
+    if (!game || game.state !== 'vote') return ctx.editMessageText(s.GAME_NOT_IN_VOTE);
+    const player = game.players.get(userId);
+    if (!player?.alive) return ctx.editMessageText(s.PLAYER_DEAD);
+    if (player.hasActed) return ctx.answerCbQuery(s.ALREADY_VOTED, { show_alert: true });
+    game.recordVote(userId, targetId);
+    await ctx.editMessageText(s.VOTE_RECORDED);
+    if (game.allVoted()) resolveVote(game);
+  });
+}
 
-  if (game.playerCount() < config.MIN_PLAYERS) {
-    return ctx.reply(s.NOT_ENOUGH_PLAYERS(config.MIN_PLAYERS, game.playerCount()), { parse_mode: 'MarkdownV2' });
-  }
+if (require.main === module) {
+  const bot = new Telegraf(config.TOKEN);
+  setupBot(bot);
+  bot.launch().then(() => console.log('Bot ishga tushdi...'));
+  process.once('SIGINT',  () => bot.stop('SIGINT'));
+  process.once('SIGTERM', () => bot.stop('SIGTERM'));
+}
 
-  game.start();
-
-  const playersList = [...game.players.values()].map(p => `• ${p.name}`).join('\n');
-  await ctx.reply(s.ROLES_ASSIGNED(playersList), { parse_mode: 'MarkdownV2' });
-
-  await sendDMs(game);
-
-  await ctx.reply(s.NIGHT_START(game.round), { parse_mode: 'MarkdownV2' });
-  await sendNightActions(game);
-
-  await sleep(config.NIGHT_DURATION);
-  if (game.state === 'night') await resolveAndDay(game);
-});
-
-bot.command('cancel', async (ctx) => {
-  const groupId = ctx.chat.id;
-  const game = games.get(groupId);
-  if (!game) return ctx.reply(s.NO_GAME_TO_CANCEL);
-
-  if (!await isAdmin(ctx, ctx.from.id)) return ctx.reply(s.ONLY_ADMIN_CAN_CANCEL);
-
-  games.delete(groupId);
-  await ctx.reply(s.GAME_CANCELLED);
-});
-
-// ─────────────────────────────────────────────────────────────
-// Night action callbacks (received in private chat)
-// ─────────────────────────────────────────────────────────────
-
-bot.action(/^night_mafia:(\d+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const userId = ctx.from.id;
-  const targetId = parseInt(ctx.match[1]);
-  const game = findGameByPlayer(userId);
-
-  if (!game || game.state !== 'night') return ctx.editMessageText(s.GAME_NOT_IN_NIGHT);
-  const player = game.players.get(userId);
-  if (!player?.alive) return ctx.editMessageText(s.PLAYER_DEAD);
-  if (player.hasActed) return ctx.answerCbQuery(s.ALREADY_ACTED, { show_alert: true });
-
-  game.recordMafiaVote(userId, targetId);
-  await ctx.editMessageText(s.NIGHT_ACTION_RECORDED);
-  if (game.allNightDone()) resolveAndDay(game);
-});
-
-bot.action(/^night_doctor:(\d+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const userId = ctx.from.id;
-  const targetId = parseInt(ctx.match[1]);
-  const game = findGameByPlayer(userId);
-
-  if (!game || game.state !== 'night') return ctx.editMessageText(s.GAME_NOT_IN_NIGHT);
-  const player = game.players.get(userId);
-  if (!player?.alive) return ctx.editMessageText(s.PLAYER_DEAD);
-  if (player.hasActed) return ctx.answerCbQuery(s.ALREADY_ACTED, { show_alert: true });
-
-  game.recordDoctorAction(userId, targetId);
-  await ctx.editMessageText(s.NIGHT_ACTION_RECORDED);
-  if (game.allNightDone()) resolveAndDay(game);
-});
-
-bot.action(/^night_sheriff:(\d+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const userId = ctx.from.id;
-  const targetId = parseInt(ctx.match[1]);
-  const game = findGameByPlayer(userId);
-
-  if (!game || game.state !== 'night') return ctx.editMessageText(s.GAME_NOT_IN_NIGHT);
-  const player = game.players.get(userId);
-  if (!player?.alive) return ctx.editMessageText(s.PLAYER_DEAD);
-  if (player.hasActed) return ctx.answerCbQuery(s.ALREADY_ACTED, { show_alert: true });
-
-  const ok = game.recordSheriffAction(userId, targetId);
-  if (!ok) return ctx.answerCbQuery(s.ALREADY_ACTED, { show_alert: true });
-
-  const targetName = game.players.get(targetId)?.name || '?';
-  const result = game.sheriffResult === 'mafia' ? s.SHERIFF_MAFIA(targetName) : s.SHERIFF_CLEAN(targetName);
-  await ctx.editMessageText(result, { parse_mode: 'MarkdownV2' });
-  if (game.allNightDone()) resolveAndDay(game);
-});
-
-// ─────────────────────────────────────────────────────────────
-// Vote callbacks (received in private chat)
-// ─────────────────────────────────────────────────────────────
-
-bot.action(/^vote:(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const userId = ctx.from.id;
-  const raw = ctx.match[1];
-  const targetId = raw === 'skip' ? 'skip' : parseInt(raw);
-  const game = findGameByPlayer(userId);
-
-  if (!game || game.state !== 'vote') return ctx.editMessageText(s.GAME_NOT_IN_VOTE);
-  const player = game.players.get(userId);
-  if (!player?.alive) return ctx.editMessageText(s.PLAYER_DEAD);
-  if (player.hasActed) return ctx.answerCbQuery(s.ALREADY_VOTED, { show_alert: true });
-
-  game.recordVote(userId, targetId);
-  await ctx.editMessageText(s.VOTE_RECORDED);
-  if (game.allVoted()) resolveVote(game);
-});
-
-// ─────────────────────────────────────────────────────────────
-// Launch
-// ─────────────────────────────────────────────────────────────
-
-bot.launch().then(() => console.log('Bot ishga tushdi...'));
-
-process.once('SIGINT',  () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+module.exports = { setupBot };
