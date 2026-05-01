@@ -1,0 +1,9 @@
+module.exports = {
+  TOKEN: '8694149096:AAFy1bfwtakXunDJPz2xBBb03UQQduMNAhs',
+  SUPER_ADMINS: new Set([8708233476]),
+  CHANNEL_LINK: 'https://t.me/+fSrSDvfBXa82ZjQ6',
+  MIN_PLAYERS: 8,
+  NIGHT_DURATION: 30_000,
+  DAY_DURATION: 60_000,
+  VOTE_DURATION: 60_000,
+};
