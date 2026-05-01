@@ -5,7 +5,7 @@ module.exports = {
     (process.env.SUPER_ADMINS || '8708233476').split(',').map(Number)
   ),
   CHANNEL_LINK: 'https://t.me/+fSrSDvfBXa82ZjQ6',
-  MIN_PLAYERS: 8,
+  MIN_PLAYERS: 4,
   NIGHT_DURATION: 30_000,
   DAY_DURATION: 60_000,
   VOTE_DURATION: 60_000,
